@@ -14,6 +14,10 @@ from logistic_sgd import LogisticRegression, load_data
 from mlp import HiddenLayer
 from rbm import RBM
 
+import imdb
+
+from sklearn import preprocessing
+
 
 # start-snippet-1
 class DBN(object):
@@ -276,9 +280,10 @@ class DBN(object):
         return train_fn, valid_score, test_score
 
 
-def test_DBN(finetune_lr=0.1, pretraining_epochs=100,
+def test_DBN(datasets, n_ins, hidden_layers_sizes, n_outs,
+             finetune_lr=0.1, pretraining_epochs=100,
              pretrain_lr=0.01, k=1, training_epochs=1000,
-             dataset='mnist.pkl.gz', batch_size=10):
+             batch_size=10):
     """
     Demonstrates how to train and test a Deep Belief Network.
 
@@ -300,8 +305,6 @@ def test_DBN(finetune_lr=0.1, pretraining_epochs=100,
     :param batch_size: the size of a minibatch
     """
 
-    datasets = load_data(dataset)
-
     train_set_x, train_set_y = datasets[0]
     valid_set_x, valid_set_y = datasets[1]
     test_set_x, test_set_y = datasets[2]
@@ -313,9 +316,9 @@ def test_DBN(finetune_lr=0.1, pretraining_epochs=100,
     numpy_rng = numpy.random.RandomState(123)
     print '... building the model'
     # construct the Deep Belief Network
-    dbn = DBN(numpy_rng=numpy_rng, n_ins=28 * 28,
-              hidden_layers_sizes=[1000, 1000, 1000],
-              n_outs=10)
+    dbn = DBN(numpy_rng=numpy_rng, n_ins=n_ins,
+              hidden_layers_sizes=hidden_layers_sizes,
+              n_outs=n_outs)
 
     # start-snippet-2
     #########################
@@ -359,7 +362,7 @@ def test_DBN(finetune_lr=0.1, pretraining_epochs=100,
 
     print '... finetuning the model'
     # early-stopping parameters
-    patience = 4 * n_train_batches  # look as this many examples regardless
+    patience = 20 * n_train_batches  # look as this many examples regardless
     patience_increase = 2.    # wait this much longer when a new best is
                               # found
     improvement_threshold = 0.995  # a relative improvement of this much is
@@ -439,4 +442,74 @@ def test_DBN(finetune_lr=0.1, pretraining_epochs=100,
 
 
 if __name__ == '__main__':
-    test_DBN()
+
+    load_data = imdb.load_data
+
+    n_words=1000  # Vocabulary size
+    maxlen=100  # Sequence longer then this get ignored
+
+    print('load data...')
+    train, valid, test = load_data(n_words=n_words, valid_portion=0.05, maxlen=maxlen)
+
+    def transform_data(data):
+        new_data_x = numpy.zeros((len(data[0]), n_words))
+        for i in range(len(data[0])):
+            for j in range(len(data[0][i])):
+                # new_data_x[i][data[0][i][j]] += 1
+                new_data_x[i][data[0][i][j]] = 1
+        return new_data_x, data[1]
+
+    print('transform data train...')
+    train = transform_data(train)
+    print('transform data valid...')
+    valid = transform_data(valid)
+    print('transform data test...')
+    test = transform_data(test)
+
+    # data scaler
+    print('concat data x...')
+    data_x_all = numpy.concatenate((train[0], valid[0], test[0]))
+    print('scale data x...')
+    data_x_all_scaled = preprocessing.MinMaxScaler().fit_transform(numpy.array(data_x_all))
+    print('grab data x...')
+    train = data_x_all_scaled[0:len(train[0])], train[1]
+    valid = data_x_all_scaled[len(train[0]): len(train[0]) + len(valid[0])], valid[1]
+    test = data_x_all_scaled[len(train[0]) + len(valid[0]):len(train[0]) + len(valid[0]) + len(test[0])], test[1]
+
+    def shared_dataset(data_xy, borrow=True):
+        """ Function that loads the dataset into shared variables
+
+        The reason we store our dataset in shared variables is to allow
+        Theano to copy it into the GPU memory (when code is run on GPU).
+        Since copying data into the GPU is slow, copying a minibatch everytime
+        is needed (the default behaviour if the data is not in a shared
+        variable) would lead to a large decrease in performance.
+        """
+        data_x, data_y = data_xy
+        shared_x = theano.shared(numpy.asarray(data_x,
+                                               dtype=theano.config.floatX),
+                                 borrow=borrow)
+        shared_y = theano.shared(numpy.asarray(data_y,
+                                               dtype=theano.config.floatX),
+                                 borrow=borrow)
+        # When storing data on the GPU it has to be stored as floats
+        # therefore we will store the labels as ``floatX`` as well
+        # (``shared_y`` does exactly that). But during our computations
+        # we need them as ints (we use labels as index, and if they are
+        # floats it doesn't make sense) therefore instead of returning
+        # ``shared_y`` we will have to cast it to int. This little hack
+        # lets ous get around this issue
+        return shared_x, T.cast(shared_y, 'int32')
+
+    test_set_x, test_set_y = shared_dataset(test)
+    valid_set_x, valid_set_y = shared_dataset(valid)
+    train_set_x, train_set_y = shared_dataset(train)
+
+    datasets = [(train_set_x, train_set_y), (valid_set_x, valid_set_y),
+            (test_set_x, test_set_y)]
+
+    test_DBN(datasets,
+             n_ins=len(train[0][0]), hidden_layers_sizes=[500,200], n_outs=2,
+             finetune_lr=0.3, pretraining_epochs=300,
+             pretrain_lr=0.1, k=1, training_epochs=1000,
+             batch_size=10)
